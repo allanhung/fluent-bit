@@ -28,7 +28,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#ifdef FLB_HAVE_SQLDB
 #include "systemd_db.h"
+#endif
+
 #include "systemd_config.h"
 
 struct flb_systemd_config *flb_systemd_config_create(struct flb_input_instance *i_ins,
@@ -107,6 +110,7 @@ struct flb_systemd_config *flb_systemd_config_create(struct flb_input_instance *
         ctx->dynamic_tag = FLB_FALSE;
     }
 
+#ifdef FLB_HAVE_SQLDB
     /* Database file */
     tmp = flb_input_get_property("db", i_ins);
     if (tmp) {
@@ -115,6 +119,7 @@ struct flb_systemd_config *flb_systemd_config_create(struct flb_input_instance *
             flb_error("[in_systemd] could not open/create database");
         }
     }
+#endif
 
     /* Max number of fields per record/entry */
     tmp = flb_input_get_property("max_fields", i_ins);
@@ -178,14 +183,22 @@ struct flb_systemd_config *flb_systemd_config_create(struct flb_input_instance *
     }
 
     if (ctx->read_from_tail == FLB_TRUE) {
-        /* Jump to the end and skip last entry */
         sd_journal_seek_tail(ctx->j);
-        sd_journal_next_skip(ctx->j, 1);
+        /*
+        * Skip up to 350 records until the end of journal is found.
+        * Workaround for bug https://github.com/systemd/systemd/issues/9934
+        * Due to the bug, sd_journal_next() returns 2 last records of each journal file.
+        * 4 GB is the default journal limit, so with 25 MB/file we may get
+        * up to 4096/25*2 ~= 350 old log messages. See also fluent-bit PR #1565.
+        */
+        ret = sd_journal_next_skip(ctx->j, 350);
+        flb_debug("[in_systemd] jump to the end of journal and skip %d last entries", ret);
     }
     else {
         sd_journal_seek_head(ctx->j);
     }
 
+#ifdef FLB_HAVE_SQLDB
     /* Check if we have a cursor in our database */
     if (ctx->db) {
         cursor = flb_systemd_db_get_cursor(ctx);
@@ -203,6 +216,7 @@ struct flb_systemd_config *flb_systemd_config_create(struct flb_input_instance *
             flb_free(cursor);
         }
     }
+#endif
 
     tmp = flb_input_get_property("strip_underscores", i_ins);
     if (tmp != NULL && flb_utils_bool(tmp)) {
@@ -229,9 +243,11 @@ int flb_systemd_config_destroy(struct flb_systemd_config *ctx)
         flb_free(ctx->path);
     }
 
+#ifdef FLB_HAVE_SQLDB
     if (ctx->db) {
         flb_systemd_db_close(ctx->db);
     }
+#endif
 
     close(ctx->ch_manager[0]);
     close(ctx->ch_manager[1]);

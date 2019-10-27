@@ -787,6 +787,38 @@ static void cb_select_max_sub_keys(int id, struct task_check *check,
     TEST_CHECK(ret == FLB_TRUE);
 }
 
+static void cb_select_max_sub_keys_group_by(int id, struct task_check *check,
+                                            char *buf, size_t size)
+{
+    int ret;
+
+    /* Expect 1 row */
+    ret = mp_count_rows(buf, size);
+    TEST_CHECK(ret == 3);
+
+    ret = mp_record_key_cmp(buf, size,
+                            0, "SUM(map['sub1']['sub3'])",
+                            MSGPACK_OBJECT_FLOAT,
+                            NULL, 0, 105.5);
+    TEST_CHECK(ret == FLB_TRUE);
+}
+
+static void cb_select_max_sub_keys_group_by_2(int id, struct task_check *check,
+                                              char *buf, size_t size)
+{
+    int ret;
+
+    /* Expect 1 row */
+    ret = mp_count_rows(buf, size);
+    TEST_CHECK(ret == 3);
+
+    ret = mp_record_key_cmp(buf, size,
+                            0, "SUM(map['sub1']['sub3'])",
+                            MSGPACK_OBJECT_FLOAT,
+                            NULL, 0, 105.5);
+    TEST_CHECK(ret == FLB_TRUE);
+}
+
 static void cb_select_sub_record_contains(int id, struct task_check *check,
                                           char *buf, size_t size)
 {
@@ -857,7 +889,17 @@ struct task_check select_subkeys_checks[] = {
         "cb_select_max_sub_keys",
         "SELECT MAX(map['sub1']['sub3']) FROM STREAM:FLB WHERE "  \
         "map['sub1']['sub3'] > 0;",
-        cb_select_max_sub_keys}
+        cb_select_max_sub_keys},
+    {   10, 0, 0, 0,
+        "cb_select_max_sub_keys_group_by",
+        "SELECT SUM(map['sub1']['sub3']) FROM STREAM:FLB "  \
+        "GROUP BY map['mtype'];",
+        cb_select_max_sub_keys_group_by},
+    {   11, 0, 0, 0,
+        "cb_select_max_sub_keys_group_by",
+        "SELECT map['sub1']['stype'], map['mtype'], SUM(map['sub1']['sub3']) " \
+        "FROM STREAM:FLB GROUP BY map['mtype'], map['sub1']['stype'];",
+        cb_select_max_sub_keys_group_by_2}
 };
 
 /* Tests to check syntactically valid/semantically invalid queries */
@@ -1122,13 +1164,105 @@ static void cb_hopping_window_5_second(int id, struct task_check *check,
     /* Check SUM value result */
     ret = mp_record_key_cmp(buf, size, 0, "SUM(id)",
                             MSGPACK_OBJECT_POSITIVE_INTEGER,
-                            NULL, 68, 0);
+                            NULL, 266, 0);
     TEST_CHECK(ret == FLB_TRUE);
 
     /* Check AVG value result */
     ret = mp_record_key_cmp(buf, size, 0, "AVG(id)",
                             MSGPACK_OBJECT_FLOAT,
-                            NULL, 0, 4.25);
+                            NULL, 0, 16.625);
+
+    TEST_CHECK(ret == FLB_TRUE);
+}
+
+static void cb_forecast_tumbling_window(int id, struct task_check *check,
+                                        char *buf, size_t size)
+{
+    int ret;
+
+    /* Expect one record only */
+    ret = mp_count_rows(buf, size);
+    TEST_CHECK(ret == 1);
+
+    /* Check SUM value result */
+    ret = mp_record_key_cmp(buf, size, 0, "FORECAST",
+                            MSGPACK_OBJECT_FLOAT,
+                            NULL, 0, 310.0);
+    TEST_CHECK(ret == FLB_TRUE);
+
+    /* Check AVG value result */
+    ret = mp_record_key_cmp(buf, size, 0, "AVG(usage)",
+                            MSGPACK_OBJECT_FLOAT,
+                            NULL, 0, 60.0);
+
+    TEST_CHECK(ret == FLB_TRUE);
+}
+
+static void cb_forecast_hopping_window(int id, struct task_check *check,
+                                       char *buf, size_t size)
+{
+    int ret;
+
+    /* Expect one record only */
+    ret = mp_count_rows(buf, size);
+    TEST_CHECK(ret == 1);
+
+    /* Check SUM value result */
+    ret = mp_record_key_cmp(buf, size, 0, "FORECAST",
+                            MSGPACK_OBJECT_FLOAT,
+                            NULL, 0, 460.0);
+    TEST_CHECK(ret == FLB_TRUE);
+
+    /* Check AVG value result */
+    ret = mp_record_key_cmp(buf, size, 0, "AVG(usage)",
+                            MSGPACK_OBJECT_FLOAT,
+                            NULL, 0, 175.0);
+
+    TEST_CHECK(ret == FLB_TRUE);
+}
+
+static void cb_forecast_r_tumbling_window(int id, struct task_check *check,
+                                          char *buf, size_t size)
+{
+    int ret;
+
+    /* Expect one record only */
+    ret = mp_count_rows(buf, size);
+    TEST_CHECK(ret == 1);
+
+    /* Check SUM value result */
+    ret = mp_record_key_cmp(buf, size, 0, "FORECAST_R",
+                            MSGPACK_OBJECT_FLOAT,
+                            NULL, 0, 39.0);
+    TEST_CHECK(ret == FLB_TRUE);
+
+    /* Check AVG value result */
+    ret = mp_record_key_cmp(buf, size, 0, "AVG(usage)",
+                            MSGPACK_OBJECT_FLOAT,
+                            NULL, 0, 60.0);
+
+    TEST_CHECK(ret == FLB_TRUE);
+}
+
+static void cb_forecast_r_hopping_window(int id, struct task_check *check,
+                                         char *buf, size_t size)
+{
+    int ret;
+
+    /* Expect one record only */
+    ret = mp_count_rows(buf, size);
+    TEST_CHECK(ret == 1);
+
+    /* Check SUM value result */
+    ret = mp_record_key_cmp(buf, size, 0, "FORECAST_R",
+                            MSGPACK_OBJECT_FLOAT,
+                            NULL, 0, 24.0);
+    TEST_CHECK(ret == FLB_TRUE);
+
+    /* Check AVG value result */
+    ret = mp_record_key_cmp(buf, size, 0, "AVG(usage)",
+                            MSGPACK_OBJECT_FLOAT,
+                            NULL, 0, 175.0);
 
     TEST_CHECK(ret == FLB_TRUE);
 }
@@ -1163,6 +1297,34 @@ struct task_check window_checks[] = {
         "SELECT SUM(id), AVG(id) FROM STREAM:FLB WINDOW HOPPING (5 SECOND, " \
         "ADVANCE BY 2 SECOND) WHERE word3 IS NOT NULL;",
         cb_hopping_window_5_second
+    },
+    {    /* FORECAST */
+        4, FLB_SP_WINDOW_TUMBLING, 1, 0,
+        "timeseries_forecast_window_tumbling",
+        "SELECT AVG(usage), TIMESERIES_FORECAST(id, usage, 20) FROM " \
+        "STREAM:FLB WINDOW TUMBLING (5 SECOND);",
+        cb_forecast_tumbling_window
+    },
+    {
+        5, FLB_SP_WINDOW_HOPPING, 5, 2,
+        "timeseries_forecast_window_hopping",
+        "SELECT AVG(usage), TIMESERIES_FORECAST(id, usage, 20) FROM " \
+        "STREAM:FLB WINDOW HOPPING (5 SECOND, ADVANCE BY 2 SECOND);",
+        cb_forecast_hopping_window
+    },
+    { /* FORECAST_R */
+        6, FLB_SP_WINDOW_TUMBLING, 1, 0,
+        "timeseries_forecast_r_window_tumbling",
+        "SELECT AVG(usage), TIMESERIES_FORECAST_R(id, usage, 500, 10000) FROM " \
+        "STREAM:FLB WINDOW TUMBLING (5 SECOND);",
+        cb_forecast_r_tumbling_window
+    },
+    {
+        7, FLB_SP_WINDOW_HOPPING, 5, 2,
+        "timeseries_forecast_r_window_hopping",
+        "SELECT AVG(usage), TIMESERIES_FORECAST_R(id, usage, 500, 10000) FROM " \
+        "STREAM:FLB WINDOW HOPPING (5 SECOND, ADVANCE BY 2 SECOND);",
+        cb_forecast_r_hopping_window
     },
 };
 

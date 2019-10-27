@@ -83,20 +83,23 @@ static void flb_output_free_properties(struct flb_output_instance *ins)
     flb_kv_release(&ins->properties);
 
 #ifdef FLB_HAVE_TLS
+    if (ins->tls_vhost) {
+        flb_sds_destroy(ins->tls_vhost);
+    }
     if (ins->tls_ca_path) {
-        flb_free(ins->tls_ca_path);
+        flb_sds_destroy(ins->tls_ca_path);
     }
     if (ins->tls_ca_file) {
-        flb_free(ins->tls_ca_file);
+        flb_sds_destroy(ins->tls_ca_file);
     }
     if (ins->tls_crt_file) {
-        flb_free(ins->tls_crt_file);
+        flb_sds_destroy(ins->tls_crt_file);
     }
     if (ins->tls_key_file) {
-        flb_free(ins->tls_key_file);
+        flb_sds_destroy(ins->tls_key_file);
     }
     if (ins->tls_key_passwd) {
-        flb_free(ins->tls_key_passwd);
+        flb_sds_destroy(ins->tls_key_passwd);
     }
 #endif
 }
@@ -179,7 +182,7 @@ static inline int instance_id(struct flb_config *config)
         return 0;
     }
 
-    entry = mk_list_entry_last(&config->filters, struct flb_output_instance,
+    entry = mk_list_entry_last(&config->outputs, struct flb_output_instance,
                                _head);
     return (entry->id + 1);
 }
@@ -304,6 +307,7 @@ struct flb_output_instance *flb_output_new(struct flb_config *config,
     instance->tls.context    = NULL;
     instance->tls_debug      = -1;
     instance->tls_verify     = FLB_TRUE;
+    instance->tls_vhost      = NULL;
     instance->tls_ca_path    = NULL;
     instance->tls_ca_file    = NULL;
     instance->tls_crt_file   = NULL;
@@ -359,7 +363,7 @@ int flb_output_set_property(struct flb_output_instance *out,
         out->match = tmp;
     }
 #ifdef FLB_HAVE_REGEX
-    else if (prop_key_check("match_regex", k, len) == 0) {
+    else if (prop_key_check("match_regex", k, len) == 0 && tmp) {
         out->match_regex = flb_regex_create(tmp);
         flb_sds_destroy(tmp);
     }
@@ -404,7 +408,7 @@ int flb_output_set_property(struct flb_output_instance *out,
         if (strcasecmp(tmp, "true") == 0 || strcasecmp(tmp, "on") == 0) {
             if ((out->flags & FLB_IO_TLS) == 0) {
                 flb_error("[config] %s don't support TLS", out->name);
-                flb_free(tmp);
+                flb_sds_destroy(tmp);
                 return -1;
             }
 
@@ -428,6 +432,9 @@ int flb_output_set_property(struct flb_output_instance *out,
         out->tls_debug = atoi(tmp);
         flb_sds_destroy(tmp);
     }
+    else if (prop_key_check("tls.vhost", k, len) == 0) {
+        out->tls_vhost = tmp;
+    }
     else if (prop_key_check("tls.ca_path", k, len) == 0) {
         out->tls_ca_path = tmp;
     }
@@ -450,7 +457,7 @@ int flb_output_set_property(struct flb_output_instance *out,
          * map it directly to avoid an extra memory allocation.
          */
         kv = flb_kv_item_create(&out->properties, (char *) k, NULL);
-        if (!k) {
+        if (!kv) {
             if (tmp) {
                 flb_sds_destroy(tmp);
             }
@@ -545,6 +552,7 @@ int flb_output_init(struct flb_config *config)
         if (ins->flags & FLB_IO_TLS) {
             ins->tls.context = flb_tls_context_new(ins->tls_verify,
                                                    ins->tls_debug,
+                                                   ins->tls_vhost,
                                                    ins->tls_ca_path,
                                                    ins->tls_ca_file,
                                                    ins->tls_crt_file,

@@ -3,7 +3,7 @@ project(fluent-bit)
 
 # Fluent Bit Version
 set(FLB_VERSION_MAJOR  1)
-set(FLB_VERSION_MINOR  3)
+set(FLB_VERSION_MINOR  4)
 set(FLB_VERSION_PATCH  0)
 set(FLB_VERSION_STR "${FLB_VERSION_MAJOR}.${FLB_VERSION_MINOR}.${FLB_VERSION_PATCH}")
 
@@ -18,6 +18,7 @@ endif()
 # Update CFLAGS
 if (MSVC)
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /W3")
+  add_definitions(-D_CRT_SECURE_NO_WARNINGS)
 else()
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall")
 endif()
@@ -45,6 +46,7 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/library")
 # Build Options
 option(FLB_ALL                "Enable all features"           No)
 option(FLB_DEBUG              "Build with debug symbols"      No)
+option(FLB_SMALL              "Optimise for small size"       No)
 option(FLB_COVERAGE           "Build with code-coverage"      No)
 option(FLB_JEMALLOC           "Build with Jemalloc support"   No)
 option(FLB_REGEX              "Build with Regex support"     Yes)
@@ -60,7 +62,7 @@ option(FLB_TESTS_INTERNAL     "Enable internal tests"         No)
 option(FLB_MTRACE             "Enable mtrace support"         No)
 option(FLB_POSIX_TLS          "Force POSIX thread storage"    No)
 option(FLB_INOTIFY            "Enable inotify support"       Yes)
-option(FLB_SQLDB              "Enable SQL embedded DB"        No)
+option(FLB_SQLDB              "Enable SQL embedded DB"       Yes)
 option(FLB_HTTP_SERVER        "Enable HTTP Server"            No)
 option(FLB_BACKTRACE          "Enable stacktrace support"    Yes)
 option(FLB_LUAJIT             "Enable Lua Scripting support" Yes)
@@ -93,61 +95,65 @@ option(FLB_PROXY_GO           "Enable Go plugins support"   Yes)
 # systems, but specific old-toolchains do not implement it.
 
 # Build-in Plugins
-option(FLB_IN_CPU             "Enable CPU input plugin"            Yes)
-option(FLB_IN_DISK            "Enable Disk input plugin"           Yes)
-option(FLB_IN_EXEC            "Enable Exec input plugin"           Yes)
-option(FLB_IN_FORWARD         "Enable Forward input plugin"        Yes)
-option(FLB_IN_HEALTH          "Enable Health input plugin"         Yes)
-option(FLB_IN_HTTP            "Enable HTTP input plugin"            No)
-option(FLB_IN_MEM             "Enable Memory input plugin"         Yes)
-option(FLB_IN_KMSG            "Enable Kernel log input plugin"     Yes)
-option(FLB_IN_LIB             "Enable library mode input plugin"   Yes)
-option(FLB_IN_RANDOM          "Enable random input plugin"         Yes)
-option(FLB_IN_SERIAL          "Enable Serial input plugin"         Yes)
-option(FLB_IN_STDIN           "Enable Standard input plugin"       Yes)
-option(FLB_IN_SYSLOG          "Enable Syslog input plugin"         Yes)
-option(FLB_IN_TAIL            "Enable Tail input plugin"           Yes)
-option(FLB_IN_TCP             "Enable TCP input plugin"            Yes)
-option(FLB_IN_MQTT            "Enable MQTT Broker input plugin"    Yes)
-option(FLB_IN_HEAD            "Enable Head input plugin"           Yes)
-option(FLB_IN_PROC            "Enable Process input plugin"        Yes)
-option(FLB_IN_SYSTEMD         "Enable Systemd input plugin"        Yes)
-option(FLB_IN_DUMMY           "Enable Dummy input plugin"          Yes)
-option(FLB_IN_NETIF           "Enable NetworkIF input plugin"      Yes)
-option(FLB_IN_WINLOG          "Enable Windows Log input plugin"     No)
-option(FLB_IN_STORAGE_BACKLOG "Enable stoage backlog input plugin" Yes)
-option(FLB_OUT_AZURE          "Enable Azure output plugin"         Yes)
-option(FLB_OUT_BIGQUERY       "Enable BigQuery output plugin"      Yes)
-option(FLB_OUT_COUNTER        "Enable Counter output plugin"       Yes)
-option(FLB_OUT_ES             "Enable Elasticsearch output plugin" Yes)
-option(FLB_OUT_EXIT           "Enable Exit output plugin"          Yes)
-option(FLB_OUT_FORWARD        "Enable Forward output plugin"       Yes)
-option(FLB_OUT_GELF           "Enable GELF output plugin"          Yes)
-option(FLB_OUT_HTTP           "Enable HTTP output plugin"          Yes)
-option(FLB_OUT_INFLUXDB       "Enable InfluxDB output plugin"      Yes)
-option(FLB_OUT_NATS           "Enable NATS output plugin"          Yes)
-option(FLB_OUT_TCP            "Enable TCP output plugin"           Yes)
-option(FLB_OUT_PLOT           "Enable Plot output plugin"          Yes)
-option(FLB_OUT_FILE           "Enable file output plugin"          Yes)
-option(FLB_OUT_TD             "Enable Treasure Data output plugin" Yes)
-option(FLB_OUT_RETRY          "Enable Retry test output plugin"     No)
-option(FLB_OUT_SPLUNK         "Enable Splunk output plugin"        Yes)
-option(FLB_OUT_STACKDRIVER    "Enable Stackdriver output plugin"   Yes)
-option(FLB_OUT_STDOUT         "Enable STDOUT output plugin"        Yes)
-option(FLB_OUT_LIB            "Enable library mode output plugin"  Yes)
-option(FLB_OUT_NULL           "Enable dev null output plugin"      Yes)
-option(FLB_OUT_FLOWCOUNTER    "Enable flowcount output plugin"     Yes)
-option(FLB_OUT_KAFKA          "Enable Kafka output plugin"          No)
-option(FLB_OUT_KAFKA_REST     "Enable Kafka Rest output plugin"    Yes)
-option(FLB_FILTER_GREP        "Enable grep filter"                 Yes)
-option(FLB_FILTER_MODIFY      "Enable modify filter"               Yes)
-option(FLB_FILTER_STDOUT      "Enable stdout filter"               Yes)
-option(FLB_FILTER_PARSER      "Enable parser filter"               Yes)
-option(FLB_FILTER_KUBERNETES  "Enable kubernetes filter"           Yes)
-option(FLB_FILTER_THROTTLE    "Enable throttle filter"             Yes)
-option(FLB_FILTER_NEST        "Enable nest filter"                 Yes)
-option(FLB_FILTER_LUA         "Enable Lua scripting filter"        Yes)
-option(FLB_FILTER_RECORD_MODIFIER "Enable record_modifier filter"  Yes)
+option(FLB_IN_CPU             "Enable CPU input plugin"             Yes)
+option(FLB_IN_THERMAL         "Enable Thermal plugin"               Yes)
+option(FLB_IN_DISK            "Enable Disk input plugin"            Yes)
+option(FLB_IN_DOCKER          "Enable Docker input plugin"          Yes)
+option(FLB_IN_EXEC            "Enable Exec input plugin"            Yes)
+option(FLB_IN_FORWARD         "Enable Forward input plugin"         Yes)
+option(FLB_IN_HEALTH          "Enable Health input plugin"          Yes)
+option(FLB_IN_HTTP            "Enable HTTP input plugin"             No)
+option(FLB_IN_MEM             "Enable Memory input plugin"          Yes)
+option(FLB_IN_KMSG            "Enable Kernel log input plugin"      Yes)
+option(FLB_IN_LIB             "Enable library mode input plugin"    Yes)
+option(FLB_IN_RANDOM          "Enable random input plugin"          Yes)
+option(FLB_IN_SERIAL          "Enable Serial input plugin"          Yes)
+option(FLB_IN_STDIN           "Enable Standard input plugin"        Yes)
+option(FLB_IN_SYSLOG          "Enable Syslog input plugin"          Yes)
+option(FLB_IN_TAIL            "Enable Tail input plugin"            Yes)
+option(FLB_IN_TCP             "Enable TCP input plugin"             Yes)
+option(FLB_IN_MQTT            "Enable MQTT Broker input plugin"     Yes)
+option(FLB_IN_HEAD            "Enable Head input plugin"            Yes)
+option(FLB_IN_PROC            "Enable Process input plugin"         Yes)
+option(FLB_IN_SYSTEMD         "Enable Systemd input plugin"         Yes)
+option(FLB_IN_DUMMY           "Enable Dummy input plugin"           Yes)
+option(FLB_IN_NETIF           "Enable NetworkIF input plugin"       Yes)
+option(FLB_IN_WINLOG          "Enable Windows Log input plugin"      No)
+option(FLB_IN_COLLECTD        "Enable Collectd input plugin"        Yes)
+option(FLB_IN_STORAGE_BACKLOG "Enable storage backlog input plugin" Yes)
+option(FLB_OUT_AZURE          "Enable Azure output plugin"          Yes)
+option(FLB_OUT_BIGQUERY       "Enable BigQuery output plugin"       Yes)
+option(FLB_OUT_COUNTER        "Enable Counter output plugin"        Yes)
+option(FLB_OUT_DATADOG        "Enable DataDog output plugin"        Yes)
+option(FLB_OUT_ES             "Enable Elasticsearch output plugin"  Yes)
+option(FLB_OUT_EXIT           "Enable Exit output plugin"           Yes)
+option(FLB_OUT_FORWARD        "Enable Forward output plugin"        Yes)
+option(FLB_OUT_GELF           "Enable GELF output plugin"           Yes)
+option(FLB_OUT_HTTP           "Enable HTTP output plugin"           Yes)
+option(FLB_OUT_INFLUXDB       "Enable InfluxDB output plugin"       Yes)
+option(FLB_OUT_NATS           "Enable NATS output plugin"           Yes)
+option(FLB_OUT_TCP            "Enable TCP output plugin"            Yes)
+option(FLB_OUT_PLOT           "Enable Plot output plugin"           Yes)
+option(FLB_OUT_FILE           "Enable file output plugin"           Yes)
+option(FLB_OUT_TD             "Enable Treasure Data output plugin"  Yes)
+option(FLB_OUT_RETRY          "Enable Retry test output plugin"      No)
+option(FLB_OUT_SPLUNK         "Enable Splunk output plugin"         Yes)
+option(FLB_OUT_STACKDRIVER    "Enable Stackdriver output plugin"    Yes)
+option(FLB_OUT_STDOUT         "Enable STDOUT output plugin"         Yes)
+option(FLB_OUT_LIB            "Enable library mode output plugin"   Yes)
+option(FLB_OUT_NULL           "Enable dev null output plugin"       Yes)
+option(FLB_OUT_FLOWCOUNTER    "Enable flowcount output plugin"      Yes)
+option(FLB_OUT_KAFKA          "Enable Kafka output plugin"           No)
+option(FLB_OUT_KAFKA_REST     "Enable Kafka Rest output plugin"     Yes)
+option(FLB_FILTER_GREP        "Enable grep filter"                  Yes)
+option(FLB_FILTER_MODIFY      "Enable modify filter"                Yes)
+option(FLB_FILTER_STDOUT      "Enable stdout filter"                Yes)
+option(FLB_FILTER_PARSER      "Enable parser filter"                Yes)
+option(FLB_FILTER_KUBERNETES  "Enable kubernetes filter"            Yes)
+option(FLB_FILTER_THROTTLE    "Enable throttle filter"              Yes)
+option(FLB_FILTER_NEST        "Enable nest filter"                  Yes)
+option(FLB_FILTER_LUA         "Enable Lua scripting filter"         Yes)
+option(FLB_FILTER_RECORD_MODIFIER "Enable record_modifier filter"   Yes)
 
 # Enable all features
 if(FLB_ALL)
@@ -224,7 +230,6 @@ if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
   endif()
 endif()
 
-
 # Optional features like Stream Processor and Record Accessor needs Flex
 # and Bison to generate it parsers.
 find_package(FLEX)
@@ -234,18 +239,14 @@ if(FLEX_FOUND AND BISON_FOUND)
   set(FLB_FLEX_BISON  1)
 endif()
 
+if(FLB_SMALL)
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Os -g0 -s -fno-stack-protector -fomit-frame-pointer -DNDEBUG -U_FORTIFY_SOURCE")
+endif()
+
 if(FLB_COVERAGE)
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -O0 --coverage -fprofile-arcs -ftest-coverage")
   set(CMAKE_BUILD_TYPE "Debug")
 endif()
-
-if(FLB_OUT_GELF)
-  find_package( ZLIB )
-  if ( NOT ZLIB_FOUND )
-     set(FLB_OUT_GELF 0)
-  endif()
-endif()
-
 
 # Enable Debug symbols if specified
 if(FLB_DEBUG)
@@ -349,10 +350,6 @@ endif()
 # Metrics
 if(FLB_METRICS)
   FLB_DEFINITION(FLB_HAVE_METRICS)
-endif()
-
-if(FLB_IN_TAIL)
-  set(FLB_SQLDB ON)
 endif()
 
 if(FLB_SQLDB)
@@ -525,8 +522,8 @@ if(FLB_JEMALLOC AND ${CMAKE_SYSTEM_NAME} MATCHES "Linux")
 
   # Link to Jemalloc as an external dependency
   ExternalProject_Add(jemalloc
-    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/lib/jemalloc-5.1.0
-    CONFIGURE_COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/lib/jemalloc-5.1.0/configure ${AUTOCONF_HOST_OPT} --with-lg-quantum=3 --enable-cc-silence --prefix=<INSTALL_DIR>
+    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/lib/jemalloc-5.2.1
+    CONFIGURE_COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/lib/jemalloc-5.2.1/configure ${AUTOCONF_HOST_OPT} --with-lg-quantum=3 --enable-cc-silence --prefix=<INSTALL_DIR>
     CFLAGS=-std=gnu99\ -Wall\ -pipe\ -g3\ -O3\ -funroll-loops
     BUILD_COMMAND $(MAKE)
     INSTALL_DIR ${CMAKE_CURRENT_BINARY_DIR}/
@@ -627,10 +624,12 @@ if(${CMAKE_SYSTEM_NAME} MATCHES "Windows")
   set(FLB_INSTALL_BINDIR "bin")
   set(FLB_INSTALL_LIBDIR "lib")
   set(FLB_INSTALL_CONFDIR "conf")
+  set(FLB_INSTALL_INCLUDEDIR "include")
 else()
   set(FLB_INSTALL_BINDIR ${CMAKE_INSTALL_FULL_BINDIR})
   set(FLB_INSTALL_LIBDIR ${CMAKE_INSTALL_LIBDIR})
   set(FLB_INSTALL_CONFDIR "${CMAKE_INSTALL_SYSCONFDIR}/${FLB_OUT_NAME}/")
+  set(FLB_INSTALL_INCLUDEDIR ${CMAKE_INSTALL_INCLUDEDIR})
 endif()
 
 # Instruct CMake to build the Fluent Bit Core
@@ -655,10 +654,6 @@ endif()
 # Installer Generation (Cpack)
 # ============================
 
-if(FLB_SYSTEM_WINDOWS)
-  set(CPACK_GENERATOR "NSIS" "ZIP")
-endif()
-
 set(CPACK_PACKAGE_VERSION ${FLB_VERSION_STR})
 set(CPACK_PACKAGE_NAME "td-agent-bit")
 set(CPACK_PACKAGE_RELEASE 1)
@@ -667,8 +662,37 @@ set(CPACK_PACKAGE_VENDOR "Treasure Data")
 set(CPACK_PACKAGING_INSTALL_PREFIX "/opt/td-agent-bit")
 set(CPACK_RESOURCE_FILE_LICENSE "${PROJECT_SOURCE_DIR}/LICENSE")
 set(CPACK_PACKAGING_INSTALL_PREFIX "/")
+
 set(CPACK_PACKAGE_FILE_NAME "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-${CPACK_PACKAGE_RELEASE}.${CMAKE_SYSTEM_PROCESSOR}")
 
+if(FLB_SYSTEM_WINDOWS)
+  set(CPACK_GENERATOR "NSIS" "ZIP")
+
+  if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    set(CPACK_PACKAGE_FILE_NAME "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-win64")
+  else()
+    set(CPACK_PACKAGE_FILE_NAME "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-win32")
+  endif()
+endif()
+
+# Debian package setup and name sanitizer
+set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+find_program(DPKG_PROGRAM dpkg DOC "dpkg program of Debian-based systems")
+if(DPKG_PROGRAM)
+  execute_process(
+    COMMAND ${DPKG_PROGRAM} --print-architecture
+    OUTPUT_VARIABLE CPACK_DEBIAN_PACKAGE_ARCHITECTURE
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+  #set(CPACK_PACKAGE_FILE_NAME
+  #  "${CPACK_PACKAGE_NAME_LOWERCASE}_${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}_${CPACK_DEBIAN_PACKAGE_ARCHITECTURE}")
+
+  set(CPACK_PACKAGE_FILE_NAME "${CPACK_PACKAGE_NAME}_${CPACK_PACKAGE_VERSION}_${CPACK_DEBIAN_PACKAGE_ARCHITECTURE}")
+
+  set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA
+    ${CMAKE_CURRENT_SOURCE_DIR}/debian/conffiles
+    )
+endif()
 
 # RPM Generation information
 set(CPACK_RPM_PACKAGE_GROUP "System Environment/Daemons")
@@ -691,6 +715,9 @@ set(CPACK_RPM_USER_FILELIST
   "%ignore /opt"
   "%ignore /etc")
 set(CPACK_RPM_PACKAGE_AUTOREQ ON)
+if(CPACK_GENERATOR MATCHES "RPM")
+  set(CPACK_PACKAGE_FILE_NAME "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-${CPACK_PACKAGE_RELEASE}.${CMAKE_SYSTEM_PROCESSOR}")
+endif()
 
 # CPack: DEB
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)

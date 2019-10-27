@@ -37,48 +37,31 @@
 #define MERGE_PARSED      1 /* merge parsed string (log_buf)             */
 #define MERGE_MAP         2 /* merge direct binary object (v)            */
 
-#define T_LOG_STREAM "stream"
-#define T_LOG_STDERR "stderr"
-
-static int is_stream_stderr(const void *data, size_t bytes)
+static int get_stream(msgpack_object_map map)
 {
     int i;
-    msgpack_unpacked result;
-    size_t off = 0;
-    msgpack_object root;
-    msgpack_object_map map;
     msgpack_object k;
     msgpack_object v;
-    msgpack_unpacked_init(&result);
-    while (msgpack_unpack_next(&result, data, bytes, &off) == MSGPACK_UNPACK_SUCCESS) {
-        root = result.data;
-        if (root.type != MSGPACK_OBJECT_ARRAY) {
-            continue;
-        }
 
-        if (root.via.array.ptr[1].type != MSGPACK_OBJECT_MAP) {
-            continue;
-        }
-        map = root.via.array.ptr[1].via.map;
-        for (i = 0; i < map.size; i++) {
-            k = map.ptr[i].key;
-            v = map.ptr[i].val;
+    for (i = 0; i < map.size; i++) {
+        k = map.ptr[i].key;
+        v = map.ptr[i].val;
 
-            if (k.type == MSGPACK_OBJECT_STR) {
-                /* Validate 'log' field */
-                if (k.via.str.size == sizeof(T_LOG_STREAM)-1 &&
-                    strncmp(k.via.str.ptr, T_LOG_STREAM, sizeof(T_LOG_STREAM)-1) == 0) {
-                    if (!strncmp(v.via.str.ptr, T_LOG_STDERR, sizeof(T_LOG_STDERR)-1)) {
-                        msgpack_unpacked_destroy(&result);
-                        return 1;
-                    }
-                    break;
-                }
+        if (k.type == MSGPACK_OBJECT_STR &&
+            strncmp(k.via.str.ptr, "stream", k.via.str.size) == 0) {
+            if (strncmp(v.via.str.ptr, "stdout", v.via.str.size) == 0) {
+                return FLB_KUBE_PROP_STREAM_STDOUT;
+            }
+            else if (strncmp(v.via.str.ptr, "stderr", v.via.str.size) == 0) {
+                return FLB_KUBE_PROP_STREAM_STDERR;
+            }
+            else {
+               return FLB_KUBE_PROP_STREAM_UNKNOWN;
             }
         }
     }
-    msgpack_unpacked_destroy(&result);
-    return 0;
+
+    return FLB_KUBE_PROP_NO_STREAM;
 }
 
 static int value_trim_size(msgpack_object o)
@@ -432,44 +415,8 @@ static int pack_map_content(msgpack_packer *pck, msgpack_sbuffer *sbuf,
         off = 0;
         msgpack_unpacked_init(&result);
         msgpack_unpack_next(&result, kube_buf, kube_size, &off);
-        root = result.data;
-
-        /* root points to a map, calc the final size */
-        map_size = root.via.map.size;
-        map_size += meta->skip;
-
-        /* Pack cached kube buf entries */
-        msgpack_pack_map(pck, map_size);
-        for (i = 0; i < root.via.map.size; i++) {
-            k = root.via.map.ptr[i].key;
-            v = root.via.map.ptr[i].val;
-            msgpack_pack_object(pck, k);
-            msgpack_pack_object(pck, v);
-        }
+        msgpack_pack_object(pck, result.data);
         msgpack_unpacked_destroy(&result);
-
-        /* Pack meta */
-        if (meta->container_name != NULL) {
-            msgpack_pack_str(pck, 14);
-            msgpack_pack_str_body(pck, "container_name", 14);
-            msgpack_pack_str(pck, meta->container_name_len);
-            msgpack_pack_str_body(pck, meta->container_name,
-                                  meta->container_name_len);
-        }
-        if (meta->docker_id != NULL) {
-            msgpack_pack_str(pck, 9);
-            msgpack_pack_str_body(pck, "docker_id", 9);
-            msgpack_pack_str(pck, meta->docker_id_len);
-            msgpack_pack_str_body(pck, meta->docker_id,
-                                  meta->docker_id_len);
-        }
-        if (meta->container_hash != NULL) {
-            msgpack_pack_str(pck, 14);
-            msgpack_pack_str_body(pck, "container_hash", 14);
-            msgpack_pack_str(pck, meta->container_hash_len);
-            msgpack_pack_str_body(pck, meta->container_hash,
-                                  meta->container_hash_len);
-        }
     }
 
     return 0;
@@ -483,7 +430,6 @@ static int cb_kube_filter(const void *data, size_t bytes,
                           struct flb_config *config)
 {
     int ret;
-    int is_stderr = 0;
     size_t pre = 0;
     size_t off = 0;
     char *dummy_cache_buf = NULL;
@@ -516,25 +462,8 @@ static int cb_kube_filter(const void *data, size_t bytes,
                                     &cache_buf, &cache_size, &meta, &props);
         }
         if (ret == -1) {
-            flb_kube_prop_destroy(&props);
             return FLB_FILTER_NOTOUCH;
         }
-
-        if (props.exclude == FLB_TRUE) {
-            *out_buf   = NULL;
-            *out_bytes = 0;
-            flb_kube_meta_release(&meta);
-            flb_kube_prop_destroy(&props);
-            return FLB_FILTER_MODIFIED;
-        }
-    }
-
-    is_stderr = is_stream_stderr(data, bytes);
-    if (is_stderr && props.stderr_parser != NULL) {
-        parser = flb_parser_get(props.stderr_parser, config);
-    }
-    else if (props.stdout_parser != NULL) {
-        parser = flb_parser_get(props.stdout_parser, config);
     }
 
     /* Create temporal msgpack buffer */
@@ -545,7 +474,11 @@ static int cb_kube_filter(const void *data, size_t bytes,
     msgpack_unpacked_init(&result);
     while (msgpack_unpack_next(&result, data, bytes, &off) == MSGPACK_UNPACK_SUCCESS) {
         root = result.data;
-        if (root.type != MSGPACK_OBJECT_ARRAY) {
+
+        if (root.type != MSGPACK_OBJECT_ARRAY ||
+            root.via.array.size != 2 ||
+            root.via.array.ptr[1].type != MSGPACK_OBJECT_MAP) {
+            flb_warn("[filter_kube] unexpected record format");
             continue;
         }
 
@@ -557,27 +490,56 @@ static int cb_kube_filter(const void *data, size_t bytes,
          * records passed to the filter have a unique source log file.
          */
         if (ctx->use_journal == FLB_TRUE && ctx->dummy_meta == FLB_FALSE) {
-            parser = NULL;
-            cache_buf = NULL;
-            memset(&props, '\0', sizeof(struct flb_kube_props));
-
             ret = flb_kube_meta_get(ctx,
                                     tag, tag_len,
                                     data + pre, off - pre,
                                     &cache_buf, &cache_size, &meta, &props);
             if (ret == -1) {
-                msgpack_sbuffer_destroy(&tmp_sbuf);
-                msgpack_unpacked_destroy(&result);
-                flb_kube_prop_destroy(&props);
-                return FLB_FILTER_NOTOUCH;
-            }
-
-            if (props.exclude == FLB_TRUE) {
-                /* Skip this record */
                 continue;
             }
 
             pre = off;
+        }
+
+        parser = NULL;
+
+        switch (get_stream(root.via.array.ptr[1].via.map)) {
+        case FLB_KUBE_PROP_STREAM_STDOUT:
+            {
+                if (props.stdout_exclude == FLB_TRUE) {
+                    /* Skip this record */
+                    if (ctx->use_journal == FLB_TRUE) {
+                        flb_kube_meta_release(&meta);
+                    }
+                    continue;
+                }
+                if (props.stdout_parser != NULL) {
+                    parser = flb_parser_get(props.stdout_parser, config);
+                }
+            }
+            break;
+        case FLB_KUBE_PROP_STREAM_STDERR:
+            {
+                if (props.stderr_exclude == FLB_TRUE) {
+                    continue;
+                }
+                if (props.stderr_parser != NULL) {
+                    parser = flb_parser_get(props.stderr_parser, config);
+                }
+            }
+            break;
+        default:
+            {
+                if (props.stdout_exclude == props.stderr_exclude &&
+                    props.stderr_exclude == FLB_TRUE) {
+                    continue;
+                }
+                if (props.stdout_parser == props.stderr_parser &&
+                    props.stderr_parser != NULL) {
+                    parser = flb_parser_get(props.stdout_parser, config);
+                }
+            }
+            break;
         }
 
         /*
@@ -611,6 +573,7 @@ static int cb_kube_filter(const void *data, size_t bytes,
 
         if (ctx->use_journal == FLB_TRUE) {
             flb_kube_meta_release(&meta);
+            flb_kube_prop_destroy(&props);
         }
     }
     msgpack_unpacked_destroy(&result);
@@ -618,6 +581,7 @@ static int cb_kube_filter(const void *data, size_t bytes,
     /* Release meta fields */
     if (ctx->use_journal == FLB_FALSE) {
         flb_kube_meta_release(&meta);
+        flb_kube_prop_destroy(&props);
     }
 
     /* link new buffers */
@@ -628,7 +592,6 @@ static int cb_kube_filter(const void *data, size_t bytes,
         flb_free(dummy_cache_buf);
     }
 
-    flb_kube_prop_destroy(&props);
     return FLB_FILTER_MODIFIED;
 }
 

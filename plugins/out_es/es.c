@@ -135,8 +135,8 @@ static char *elasticsearch_format(const void *data, size_t bytes,
     int ret;
     int len;
     int map_size;
-    int index_len;
-    size_t s;
+    int index_len = 0;
+    size_t s = 0;
     size_t off = 0;
     char *p;
     char *buf;
@@ -215,8 +215,8 @@ static char *elasticsearch_format(const void *data, size_t bytes,
     if (ctx->logstash_format == FLB_FALSE && ctx->generate_id == FLB_FALSE) {
         flb_time_get(&tms);
         gmtime_r(&tms.tm.tv_sec, &tm);
-        s = strftime(index_formatted, sizeof(index_formatted) - 1,
-                     ctx->index, &tm);
+        strftime(index_formatted, sizeof(index_formatted) - 1,
+                 ctx->index, &tm);
         es_index = index_formatted;
 
         index_len = snprintf(j_index,
@@ -587,6 +587,7 @@ void cb_es_flush(const void *data, size_t bytes,
         /* The request was issued successfully, validate the 'error' field */
         flb_debug("[out_es] HTTP Status=%i URI=%s", c->resp.status, ctx->uri);
         if (c->resp.status != 200 && c->resp.status != 201) {
+            flb_trace("[es_out] payload response: %s", c->resp.payload);
             goto retry;
         }
 

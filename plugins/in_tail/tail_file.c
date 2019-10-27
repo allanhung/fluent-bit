@@ -399,10 +399,9 @@ static void cb_results(const char *name, const char *value,
                        size_t vlen, void *data)
 {
     struct flb_hash *ht = data;
-    char *p;
 
-    while ((p = strchr(value, '.'))) {
-        *p = '_';
+    if (vlen == 0) {
+        return;
     }
 
     flb_hash_add(ht, name, strlen(name), value, vlen);
@@ -410,15 +409,14 @@ static void cb_results(const char *name, const char *value,
 #endif
 
 #ifdef FLB_HAVE_REGEX
-static int tag_compose(char *tag, struct flb_regex *tag_regex, char *fname, char **out_buf, size_t *out_size)
+static int tag_compose(char *tag, struct flb_regex *tag_regex, char *fname, char *out_buf, size_t *out_size)
 #else
-static int tag_compose(char *tag, char *fname, char **out_buf, size_t *out_size)
+static int tag_compose(char *tag, char *fname, char *out_buf, size_t *out_size)
 #endif
 {
     int i;
     int len;
     char *p;
-    char *buf = *out_buf;
     size_t buf_s = 0;
 #ifdef FLB_HAVE_REGEX
     ssize_t n;
@@ -445,7 +443,7 @@ static int tag_compose(char *tag, char *fname, char **out_buf, size_t *out_size)
             for (p = tag, beg = p; (beg = strchr(p, '<')); p = end + 2) {
                 if (beg != p) {
                     len = (beg - p);
-                    memcpy(buf + buf_s, p, len);
+                    memcpy(out_buf + buf_s, p, len);
                     buf_s += len;
                 }
 
@@ -458,11 +456,11 @@ static int tag_compose(char *tag, char *fname, char **out_buf, size_t *out_size)
                     len = end - beg + 1;
                     ret = flb_hash_get(ht, beg, len, &tmp, &tmp_s);
                     if (ret != -1) {
-                        memcpy(buf + buf_s, tmp, tmp_s);
+                        memcpy(out_buf + buf_s, tmp, tmp_s);
                         buf_s += tmp_s;
                     }
                     else {
-                        memcpy(buf + buf_s, "_", 1);
+                        memcpy(out_buf + buf_s, "_", 1);
                         buf_s++;
                     }
                 }
@@ -477,7 +475,7 @@ static int tag_compose(char *tag, char *fname, char **out_buf, size_t *out_size)
 
             if (*p) {
                 len = strlen(p);
-                memcpy(buf + buf_s, p, len);
+                memcpy(out_buf + buf_s, p, len);
                 buf_s += len;
             }
         }
@@ -492,60 +490,60 @@ static int tag_compose(char *tag, char *fname, char **out_buf, size_t *out_size)
         /* Copy tag prefix if any */
         len = (p - tag);
         if (len > 0) {
-            memcpy(buf, tag, len);
+            memcpy(out_buf, tag, len);
             buf_s += len;
         }
 
         /* Append file name */
         len = strlen(fname);
-        memcpy(buf + buf_s, fname, len);
+        memcpy(out_buf + buf_s, fname, len);
         buf_s += len;
 
         /* Tag suffix (if any) */
         p++;
         if (*p) {
             len = strlen(tag);
-            memcpy(buf + buf_s, p, (len - (p - tag)));
+            memcpy(out_buf + buf_s, p, (len - (p - tag)));
             buf_s += (len - (p - tag));
         }
 
         /* Sanitize buffer */
         for (i = 0; i < buf_s; i++) {
-            if (buf[i] == '/') {
+            if (out_buf[i] == '/') {
                 if (i > 0) {
-                    buf[i] = '.';
+                    out_buf[i] = '.';
                 }
                 else {
-                    drop_bytes(buf, buf_s, i, 1);
+                    drop_bytes(out_buf, buf_s, i, 1);
                     buf_s--;
                     i--;
                 }
             }
 
-            if (buf[i] == '.' && i > 0) {
-                if (buf[i - 1] == '.') {
-                    drop_bytes(buf, buf_s, i, 1);
+            if (out_buf[i] == '.' && i > 0) {
+                if (out_buf[i - 1] == '.') {
+                    drop_bytes(out_buf, buf_s, i, 1);
                     buf_s--;
                     i--;
                 }
             }
-            else if (buf[i] == '*') {
-                    drop_bytes(buf, buf_s, i, 1);
+            else if (out_buf[i] == '*') {
+                    drop_bytes(out_buf, buf_s, i, 1);
                     buf_s--;
                     i--;
             }
         }
 
         /* Check for an ending '.' */
-        if (buf[buf_s - 1] == '.') {
-            drop_bytes(buf, buf_s, buf_s - 1, 1);
+        if (out_buf[buf_s - 1] == '.') {
+            drop_bytes(out_buf, buf_s, buf_s - 1, 1);
             buf_s--;
         }
 #ifdef FLB_HAVE_REGEX
     }
 #endif
 
-    buf[buf_s] = '\0';
+    out_buf[buf_s] = '\0';
     *out_size = buf_s;
 
     return 0;
@@ -580,10 +578,10 @@ int flb_tail_file_append(char *path, struct stat *st, int mode,
 {
     int fd;
     int ret;
+    int len;
     off_t offset;
-    char *p;
-    char out_tmp[PATH_MAX];
-    size_t out_size;
+    char *tag;
+    size_t tag_len;
     struct mk_list *head;
     struct flb_tail_file *file;
 
@@ -619,8 +617,7 @@ int flb_tail_file_append(char *path, struct stat *st, int mode,
     file = flb_calloc(1, sizeof(struct flb_tail_file));
     if (!file) {
         flb_errno();
-        close(fd);
-        return -1;
+        goto error;
     }
 
     /* Initialize */
@@ -641,16 +638,24 @@ int flb_tail_file_append(char *path, struct stat *st, int mode,
     ret = flb_tail_file_name_dup(path, file);
     if (!file->name) {
         flb_errno();
-        close(fd);
-        flb_free(file);
-        return -1;
+        goto error;
     }
+
+#if defined(__APPLE__)
+    char *name = flb_tail_file_name(file);
+    if (name == NULL) {
+        goto error;
+    }
+    if (flb_tail_file_exists(name, ctx)) {
+        flb_free(name);
+        goto error;
+    }
+    flb_free(name);
+#endif
 
 #ifdef _MSC_VER
     if (get_inode(fd, &file->inode)) {
-        close(fd);
-        flb_free(file);
-        return -1;
+        goto error;
     }
 #else
     file->inode     = st->st_ino;
@@ -673,7 +678,9 @@ int flb_tail_file_append(char *path, struct stat *st, int mode,
     file->dmode_flush_timeout = 0;
     file->dmode_buf = flb_sds_create_size(ctx->docker_mode == FLB_TRUE ? 65536 : 0);
     file->dmode_lastline = flb_sds_create_size(ctx->docker_mode == FLB_TRUE ? 20000 : 0);
+#ifdef FLB_HAVE_SQLDB
     file->db_id     = 0;
+#endif
     file->skip_next = FLB_FALSE;
     file->skip_warn = FLB_FALSE;
 
@@ -682,38 +689,48 @@ int flb_tail_file_append(char *path, struct stat *st, int mode,
     file->buf_data = flb_malloc(file->buf_size);
     if (!file->buf_data) {
         flb_errno();
-        close(fd);
-        flb_free(file->name);
-        flb_free(file);
-        return -1;
+        goto error;
     }
 
     /* Initialize (optional) dynamic tag */
     if (ctx->dynamic_tag == FLB_TRUE) {
-        p = out_tmp;
+        len = ctx->i_ins->tag_len + strlen(path) + 1;
+        tag = flb_malloc(len);
+        if (!tag) {
+            flb_errno();
+            flb_error("[in_tail] failed to allocate tag buffer");
+            goto error;
+        }
 #ifdef FLB_HAVE_REGEX
-        ret = tag_compose(ctx->i_ins->tag, ctx->tag_regex, path, &p,
-                          &out_size);
+        ret = tag_compose(ctx->i_ins->tag, ctx->tag_regex, path, tag, &tag_len);
 #else
-        ret = tag_compose(ctx->i_ins->tag, path, &p, &out_size);
+        ret = tag_compose(ctx->i_ins->tag, path, tag, &tag_len);
 #endif
         if (ret == 0) {
-            file->tag_len = out_size;
-            file->tag_buf = flb_strdup(p);
+            file->tag_len = tag_len;
+            file->tag_buf = flb_strdup(tag);
+        }
+        flb_free(tag);
+        if (ret != 0) {
+            flb_error("[in_tail] failed to compose tag for file: %s", path);
+            goto error;
         }
     }
     else {
         file->tag_len = strlen(ctx->i_ins->tag);
         file->tag_buf = flb_strdup(ctx->i_ins->tag);
     }
+    if (!file->tag_buf) {
+        flb_error("[in_tail] failed to set tag for file: %s", path);
+        flb_errno();
+        goto error;
+    }
 
     /* Register this file into the fs_event monitoring */
     ret = flb_tail_fs_add(file);
     if (ret == -1) {
         flb_error("[in_tail] could not register file into fs_events");
-        flb_free(file->name);
-        flb_free(file);
-        return -1;
+        goto error;
     }
 
     if (mode == FLB_TAIL_STATIC) {
@@ -727,9 +744,11 @@ int flb_tail_file_append(char *path, struct stat *st, int mode,
      * Register or update the file entry, likely if the entry already exists
      * into the database, the offset may be updated.
      */
+#ifdef FLB_HAVE_SQLDB
     if (ctx->db) {
         flb_tail_db_file_set(file, ctx);
     }
+#endif
 
     /* Seek if required */
     if (file->offset > 0) {
@@ -737,7 +756,7 @@ int flb_tail_file_append(char *path, struct stat *st, int mode,
         if (offset == -1) {
             flb_errno();
             flb_tail_file_remove(file);
-            return -1;
+            goto error;
         }
     }
 
@@ -747,6 +766,20 @@ int flb_tail_file_append(char *path, struct stat *st, int mode,
 
     flb_debug("[in_tail] add to scan queue %s, offset=%lu", path, file->offset);
     return 0;
+
+error:
+    if (file) {
+        if (file->buf_data) {
+            flb_free(file->buf_data);
+        }
+        if (file->name) {
+            flb_free(file->name);
+        }
+        flb_free(file);
+    }
+    close(fd);
+
+    return -1;
 }
 
 void flb_tail_file_remove(struct flb_tail_file *file)
@@ -894,9 +927,11 @@ int flb_tail_file_chunk(struct flb_tail_file *file)
         file->buf_len -= processed_bytes;
         file->buf_data[file->buf_len] = '\0';
 
+#ifdef FLB_HAVE_SQLDB
         if (file->config->db) {
             flb_tail_db_file_offset(file, file->config);
         }
+#endif
 
         /* Data was consumed but likely some bytes still remain */
         return FLB_TAIL_OK;
@@ -1110,6 +1145,7 @@ int flb_tail_file_rotated(struct flb_tail_file *file)
               file->name, name);
 
     /* Rotate the file in the database */
+#ifdef FLB_HAVE_SQLDB
     if (file->config->db) {
         ret = flb_tail_db_file_rotate(name, file, file->config);
         if (ret == -1) {
@@ -1117,6 +1153,7 @@ int flb_tail_file_rotated(struct flb_tail_file *file)
                       file->name, name);
         }
     }
+#endif
 
     /* Update local file entry */
     tmp        = file->name;

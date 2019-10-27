@@ -178,6 +178,41 @@ static void sp_info(struct flb_sp *sp)
     }
 }
 
+int subkeys_compare(struct mk_list *subkeys1, struct mk_list *subkeys2)
+{
+    int i;
+    struct flb_slist_entry *entry1;
+    struct flb_slist_entry *entry2;
+
+    if (!subkeys1 && !subkeys2) {
+        return 0;
+    }
+
+    if (!subkeys1 || !subkeys2) {
+        return -1;
+    }
+
+    if (mk_list_size(subkeys1) != mk_list_size(subkeys2)) {
+        return -1;
+    }
+
+    entry1 = mk_list_entry_first(subkeys1, struct flb_slist_entry, _head);
+    entry2 = mk_list_entry_first(subkeys2, struct flb_slist_entry, _head);
+
+    for (i = 0; i < mk_list_size(subkeys1); i++) {
+        if (flb_sds_cmp(entry1->str, entry2->str, flb_sds_len(entry2->str)) != 0) {
+            return -1;
+        }
+
+        entry1 = mk_list_entry_next(&entry1->_head, struct flb_slist_entry,
+                                    _head, subkeys1);
+        entry2 = mk_list_entry_next(&entry2->_head, struct flb_slist_entry,
+                                    _head, subkeys2);
+    }
+
+    return 0;
+}
+
 static int sp_cmd_aggregated_keys(struct flb_sp_cmd *cmd)
 {
     int aggr = 0;
@@ -193,7 +228,8 @@ static int sp_cmd_aggregated_keys(struct flb_sp_cmd *cmd)
             continue;
         }
 
-        if (key->aggr_func > 0) { /* AVG, SUM or COUNT */
+        if (key->aggr_func > 0 || key->timeseries_func > 0) {
+            /* AVG, SUM, COUNT or timeseries functions */
             aggr++;
         }
         else {
@@ -206,6 +242,10 @@ static int sp_cmd_aggregated_keys(struct flb_sp_cmd *cmd)
 
                 if (flb_sds_cmp(key->name, gb_key->name,
                                 flb_sds_len(gb_key->name)) == 0) {
+                    if (subkeys_compare(key->subkeys, gb_key->subkeys) != 0) {
+                        continue;
+                    }
+
                     not_aggr--;
 
                     /* Map key selector with group-by */
@@ -461,6 +501,7 @@ struct flb_sp_task *flb_sp_task_create(struct flb_sp *sp, const char *name,
      * context (this will be associated to the task in a later step
      */
     cmd = flb_sp_cmd_create(query);
+
     if (!cmd) {
         flb_error("[sp] invalid query on task '%s': '%s'", name, query);
         return NULL;
@@ -588,10 +629,16 @@ struct flb_sp_task *flb_sp_task_create(struct flb_sp *sp, const char *name,
  * Destroy aggregation node context: before to use this function make sure
  * to unlink from the linked list.
  */
-void flb_sp_aggr_node_destroy(struct aggr_node *aggr_node)
+void flb_sp_aggr_node_destroy(struct flb_sp_cmd *cmd,
+                              struct aggr_node *aggr_node)
 {
     int i;
+    int key_id;
+    int params;
+    struct mk_list *head;
     struct aggr_num *num;
+    struct flb_sp_cmd_key *ckey;
+    struct timeseries *f;
 
     for (i = 0; i < aggr_node->nums_size; i++) {
         num = &aggr_node->nums[i];
@@ -607,12 +654,39 @@ void flb_sp_aggr_node_destroy(struct aggr_node *aggr_node)
         }
     }
 
+    key_id = 0;
+    mk_list_foreach(head, &cmd->keys) {
+        ckey = mk_list_entry(head, struct flb_sp_cmd_key, _head);
+
+        if (ckey->name || !ckey->timeseries_func) {
+            continue;
+        }
+
+        /* Find the timeseries function corresponding to the key */
+        f = aggr_node->ts[key_id];
+        if (aggr_node->ts[key_id]->nums) {
+            params = mk_list_size(&ckey->timeseries->params);
+            for (i = 0; i < params; i++) {
+                num = &f->nums[i];
+                if (num->type == FLB_SP_STRING) {
+                    flb_sds_destroy(num->string);
+                }
+            }
+        }
+
+        ckey->timeseries->cb_func_destroy(f);
+        flb_free(f->nums);
+        flb_free(f);
+    }
+
     flb_free(aggr_node->nums);
     flb_free(aggr_node->groupby_nums);
+    flb_free(aggr_node->ts);
     flb_free(aggr_node);
 }
 
-void flb_sp_window_destroy(struct flb_sp_task_window *window)
+void flb_sp_window_destroy(struct flb_sp_cmd *cmd,
+                           struct flb_sp_task_window *window)
 {
     struct flb_sp_window_data *data;
     struct aggr_node *aggr_node;
@@ -632,7 +706,7 @@ void flb_sp_window_destroy(struct flb_sp_task_window *window)
     mk_list_foreach_safe(head, tmp, &window->aggr_list) {
         aggr_node = mk_list_entry(head, struct aggr_node, _head);
         mk_list_del(&aggr_node->_head);
-        flb_sp_aggr_node_destroy(aggr_node);
+        flb_sp_aggr_node_destroy(cmd, aggr_node);
     }
 
     mk_list_foreach_safe(head, tmp, &window->hopping_slot) {
@@ -640,7 +714,7 @@ void flb_sp_window_destroy(struct flb_sp_task_window *window)
         mk_list_foreach_safe(head_hs, tmp_hs, &hs->aggr_list) {
             aggr_node = mk_list_entry(head_hs, struct aggr_node, _head);
             mk_list_del(&aggr_node->_head);
-            flb_sp_aggr_node_destroy(aggr_node);
+            flb_sp_aggr_node_destroy(cmd, aggr_node);
         }
         rb_tree_destroy(&hs->aggr_tree);
         flb_free(hs);
@@ -653,7 +727,7 @@ void flb_sp_task_destroy(struct flb_sp_task *task)
 {
     flb_sds_destroy(task->name);
     flb_sds_destroy(task->query);
-    flb_sp_window_destroy(&task->window);
+    flb_sp_window_destroy(task->cmd, &task->window);
     mk_list_del(&task->_head);
 
     if (task->stream) {
@@ -1100,12 +1174,13 @@ static void package_results(const char *tag, int tag_len,
                             char **out_buf, size_t *out_size,
                             struct flb_sp_task *task)
 {
+    char key_name[256];
     int i;
     int len;
     int map_entries;
-    double d_val;
     int records;
-    char key_name[256];
+    int ts_keys;
+    double d_val;
     msgpack_sbuffer mp_sbuf;
     msgpack_packer mp_pck;
     struct aggr_num *num;
@@ -1116,6 +1191,7 @@ static void package_results(const char *tag, int tag_len,
     struct aggr_node *aggr_node;
     struct flb_sp_cmd_gb_key *gb_key = NULL;
 
+    ts_keys = 0;
     map_entries = mk_list_size(&cmd->keys);
 
     msgpack_sbuffer_init(&mp_sbuf);
@@ -1144,6 +1220,12 @@ static void package_results(const char *tag, int tag_len,
             }
             else if (ckey->record_func > 0) {
                 flb_sp_func_record(tag, tag_len, &tm, &mp_pck, ckey);
+                goto next;
+            } else if (ckey->timeseries_func > 0) {
+                ckey->timeseries->cb_func_calc(aggr_node->ts[ts_keys],
+                                               ckey, &mp_pck,
+                                               records, &tm);
+                ts_keys++;
                 goto next;
             }
 
@@ -1205,7 +1287,7 @@ static void package_results(const char *tag, int tag_len,
              */
             if (ckey->gb_key != NULL) {
                 gb_key = ckey->gb_key;
-                if (aggr_node && aggr_node->groupby_keys > 0) {
+                if (aggr_node->groupby_keys > 0) {
                     num = &aggr_node->groupby_nums[gb_key->id];
                 }
             }
@@ -1273,6 +1355,350 @@ next:
     *out_size = mp_sbuf.size;
 }
 
+static int sp_process_timeseries_data(struct flb_sp_cmd *cmd,
+                                      struct aggr_node *aggr_node,
+                                      msgpack_object map, struct flb_time *tms)
+{
+    int i;
+    int map_size;
+    int key_id;
+    int key_id_ts;
+    msgpack_object key;
+    struct mk_list *head;
+    struct mk_list *head_ts;
+    struct flb_sp_cmd_key *ckey;
+    struct flb_exp_param *param;
+    struct flb_sp_value *sval;
+    struct flb_exp_key *exp_key;
+    struct flb_exp_val *exp_val;
+    struct aggr_num *nums_ts;
+    struct timeseries *f;
+
+    key_id = 0;
+    nums_ts = NULL;
+    map_size = map.via.map.size;
+
+    mk_list_foreach(head, &cmd->keys) {
+        ckey = mk_list_entry(head, struct flb_sp_cmd_key, _head);
+
+        if (ckey->name || !ckey->timeseries_func) {
+            continue;
+        }
+
+        /* Find the timeseries function corresponding to the key */
+        f = aggr_node->ts[key_id];
+
+        if (!f) {
+            f = ckey->timeseries->cb_func_alloc(ckey->timeseries_func);
+            if (!f) {
+                flb_errno();
+                return -1;
+            }
+
+            f->nums = (struct aggr_num *)
+                      flb_calloc(1, sizeof(struct aggr_num) *
+                                 mk_list_size(&ckey->timeseries->params));
+            if (!f->nums) {
+                flb_errno();
+                return -1;
+            }
+            /* add constant parameters at creation time */
+            key_id_ts = 0;
+            mk_list_foreach(head_ts, &ckey->timeseries->params) {
+                param = mk_list_entry(head_ts, struct flb_exp_param, _head);
+                switch (param->param->type) {
+                case FLB_EXP_BOOL:
+                    exp_val = (struct flb_exp_val *) param->param;
+                    f->nums[key_id_ts].type = FLB_SP_BOOLEAN;
+                    f->nums[key_id_ts].boolean = exp_val->val.boolean;
+                    break;
+                case FLB_EXP_INT:
+                    exp_val = (struct flb_exp_val *) param->param;
+                    f->nums[key_id_ts].type = FLB_SP_NUM_I64;
+                    f->nums[key_id_ts].i64 = exp_val->val.i64;
+                    break;
+                case FLB_EXP_FLOAT:
+                    exp_val = (struct flb_exp_val *) param->param;
+                    f->nums[key_id_ts].type = FLB_SP_NUM_F64;
+                    f->nums[key_id_ts].f64 = exp_val->val.f64;
+                    break;
+                case FLB_EXP_STRING:
+                    exp_val = (struct flb_exp_val *) param->param;
+                    f->nums[key_id_ts].type = FLB_SP_STRING;
+                    f->nums[key_id_ts].string =
+                        flb_sds_create_len(exp_val->val.string,
+                                           flb_sds_len(exp_val->val.string));
+                    break;
+                default:
+                    break;
+                }
+
+                key_id_ts++;
+            }
+
+            aggr_node->ts[key_id] = f;
+        }
+
+        nums_ts = f->nums;
+
+        /* Populate pre-defined function parameters */
+        key_id_ts = 0;
+        mk_list_foreach(head_ts, &ckey->timeseries->params) {
+            param = mk_list_entry(head_ts, struct flb_exp_param, _head);
+
+            switch (param->param->type) {
+            case FLB_EXP_KEY:
+                exp_key = (struct flb_exp_key *) param->param;
+
+                if (exp_key->func == FLB_SP_RECORD_TIME) {
+                    nums_ts[key_id_ts].type = FLB_SP_NUM_F64;
+                    nums_ts[key_id_ts].f64 = flb_time_to_double(tms);
+                }
+            }
+            key_id_ts++;
+        }
+
+        for (i = 0; i < map_size; i++) {
+            key = map.via.map.ptr[i].key;
+
+            if (key.type != MSGPACK_OBJECT_STR) {
+                continue;
+            }
+
+            key_id_ts = 0;
+            mk_list_foreach(head_ts, &ckey->timeseries->params) {
+                param = mk_list_entry(head_ts, struct flb_exp_param, _head);
+
+                switch (param->param->type) {
+                case FLB_EXP_KEY:
+                    exp_key = (struct flb_exp_key *) param->param;
+
+                    if (flb_sds_cmp(exp_key->name, key.via.str.ptr,
+                                    key.via.str.size) != 0) {
+                        key_id_ts++;
+                        continue;
+                    }
+
+                    sval = flb_sp_key_to_value(exp_key->name, map,
+                                               exp_key->subkeys);
+                    if (!sval) {
+                        key_id_ts++;
+                        continue;
+                    }
+                    break;
+                default:
+                    key_id_ts++;
+                    continue;
+                    break;
+                }
+
+                switch (sval->o.type) {
+                case MSGPACK_OBJECT_BOOLEAN:
+                    nums_ts[key_id_ts].type = FLB_SP_BOOLEAN;
+                    nums_ts[key_id_ts].boolean = sval->o.via.boolean;
+                    break;
+                case MSGPACK_OBJECT_POSITIVE_INTEGER:
+                case MSGPACK_OBJECT_NEGATIVE_INTEGER:
+                    nums_ts[key_id_ts].type = FLB_SP_NUM_I64;
+                    nums_ts[key_id_ts].i64 = sval->o.via.i64;
+                    break;
+                case MSGPACK_OBJECT_FLOAT32:
+                case MSGPACK_OBJECT_FLOAT:
+                    nums_ts[key_id_ts].type = FLB_SP_NUM_F64;
+                    nums_ts[key_id_ts].f64 = sval->o.via.f64;
+                    break;
+                case MSGPACK_OBJECT_STR:
+                    nums_ts[key_id_ts].type = FLB_SP_STRING;
+                    if (nums_ts[key_id_ts].string == NULL) {
+                        nums_ts[key_id_ts].string =
+                            flb_sds_create_len(sval->o.via.str.ptr,
+                                               sval->o.via.str.size);
+                    }
+                    break;
+                default:
+                    break;
+                }
+
+                key_id_ts++;
+                flb_sp_key_value_destroy(sval);
+            }
+        }
+
+        /* Timeseries values are populated. Now, call the function */
+        ckey->timeseries->cb_func_add(f, tms);
+
+        key_id++;
+    }
+
+    return 0;
+}
+
+static struct aggr_node * sp_process_aggregation_data(struct flb_sp_task *task,
+                                                      msgpack_object map)
+{
+    int i;
+    int ret;
+    int map_size;
+    int key_id;
+    int map_entries;
+    int gb_entries;
+    int values_found;
+    int64_t ival;
+    double dval;
+    struct flb_sp_value *sval;
+    struct aggr_num *gb_nums;
+    struct aggr_node *aggr_node;
+    struct flb_sp_cmd *cmd;
+    struct flb_sp_cmd_gb_key *gb_key;
+    struct mk_list *head;
+    struct rb_tree_node *rb_result;
+    msgpack_object key;
+
+    aggr_node = NULL;
+    cmd = task->cmd;
+    map_size = map.via.map.size;
+    values_found = 0;
+
+    /* Number of expected output entries in the map */
+    map_entries = mk_list_size(&cmd->keys);
+    gb_entries = mk_list_size(&cmd->gb_keys);
+
+    if (gb_entries > 0) {
+        gb_nums = flb_calloc(1, sizeof(struct aggr_num) * gb_entries);
+        if (!gb_nums) {
+            return NULL;
+        }
+
+        /* extract GROUP BY values */
+        for (i = 0; i < map_size; i++) { /* extract group-by values */
+            key = map.via.map.ptr[i].key;
+
+            key_id = 0;
+            mk_list_foreach(head, &cmd->gb_keys) {
+                gb_key = mk_list_entry(head, struct flb_sp_cmd_gb_key,
+                                       _head);
+                if (flb_sds_cmp(gb_key->name, key.via.str.ptr,
+                                key.via.str.size) != 0) {
+                    key_id++;
+                    continue;
+                }
+
+                sval = flb_sp_key_to_value(gb_key->name, map, gb_key->subkeys);
+                if (!sval) {
+                    /* If evaluation fails/sub-key doesn't exist */
+                    key_id++;
+                    continue;
+                }
+
+                values_found++;
+
+                /* Convert string to number if that is possible */
+                ret = object_to_number(sval->o, &ival, &dval);
+                if (ret == -1) {
+                    if (sval->o.type == MSGPACK_OBJECT_STR) {
+                        gb_nums[key_id].type = FLB_SP_STRING;
+                        gb_nums[key_id].string =
+                            flb_sds_create_len(sval->o.via.str.ptr,
+                                               sval->o.via.str.size);
+                    }
+                    else if (sval->o.type == MSGPACK_OBJECT_BOOLEAN) {
+                        gb_nums[key_id].type = FLB_SP_NUM_I64;
+                        gb_nums[key_id].i64 = sval->o.via.boolean;
+                    }
+                }
+                else if (ret == FLB_STR_INT) {
+                    gb_nums[key_id].type = FLB_SP_NUM_I64;
+                    gb_nums[key_id].i64 = ival;
+                }
+                else if (ret == FLB_STR_FLOAT) {
+                    gb_nums[key_id].type = FLB_SP_NUM_F64;
+                    gb_nums[key_id].f64 = dval;
+                }
+
+                key_id++;
+                flb_sp_key_value_destroy(sval);
+            }
+        }
+
+        /* if some GROUP BY keys are not found in the record */
+        if (values_found < gb_entries) {
+            flb_free(gb_nums);
+            return NULL;
+        }
+
+        aggr_node = (struct aggr_node *) flb_calloc(1, sizeof(struct aggr_node));
+        if (!aggr_node) {
+            flb_errno();
+            flb_free(gb_nums);
+            return NULL;
+        }
+
+        aggr_node->groupby_keys = gb_entries;
+        aggr_node->groupby_nums = gb_nums;
+        if (cmd->timeseries_num > 0) {
+            aggr_node->ts = (struct timeseries **)
+                            flb_calloc(1, sizeof(struct timeseries *) * cmd->timeseries_num);
+            if (!aggr_node->ts) {
+                flb_errno();
+                flb_sp_aggr_node_destroy(cmd, aggr_node);
+                return NULL;
+            }
+        }
+
+        rb_tree_find_or_insert(&task->window.aggr_tree, aggr_node, &aggr_node->_rb_head, &rb_result);
+        if (&aggr_node->_rb_head != rb_result) {
+            /* We don't need aggr_node anymore */
+            flb_sp_aggr_node_destroy(cmd, aggr_node);
+
+            aggr_node = container_of(rb_result, struct aggr_node, _rb_head);
+            container_of(rb_result, struct aggr_node, _rb_head)->records++;
+        }
+        else {
+            aggr_node->nums = flb_calloc(1, sizeof(struct aggr_num) * map_entries);
+            if (!aggr_node->nums) {
+                flb_sp_aggr_node_destroy(cmd, aggr_node);
+                return NULL;
+            }
+            aggr_node->records = 1;
+            aggr_node->nums_size = map_entries;
+            if (cmd->timeseries_num > 0) {
+                aggr_node->ts = (struct timeseries **)
+                                flb_calloc(1, sizeof(struct timeseries *) * cmd->timeseries_num);
+                if (!aggr_node->ts) {
+                    flb_errno();
+                    flb_sp_aggr_node_destroy(cmd, aggr_node);
+                    return NULL;
+                }
+            }
+            mk_list_add(&aggr_node->_head, &task->window.aggr_list);
+        }
+    }
+    else { /* If query doesn't have GROUP BY */
+        if (!mk_list_size(&task->window.aggr_list)) {
+            aggr_node = flb_calloc(1, sizeof(struct aggr_node));
+            if (!aggr_node) {
+                return NULL;
+            }
+            aggr_node->nums = flb_calloc(1, sizeof(struct aggr_num) * map_entries);
+            if (!aggr_node->nums) {
+                flb_sp_aggr_node_destroy(cmd, aggr_node);
+                return NULL;
+            }
+
+            aggr_node->nums_size = map_entries;
+            aggr_node->records = 1;
+            aggr_node->ts = (struct timeseries **) flb_calloc(1, sizeof(struct timeseries *) * cmd->timeseries_num);
+            mk_list_add(&aggr_node->_head, &task->window.aggr_list);
+        }
+        else {
+            aggr_node = mk_list_entry_first(&task->window.aggr_list, struct aggr_node, _head);
+            aggr_node->records++;
+        }
+    }
+
+    return aggr_node;
+}
+
 /*
  * Process data, task and it defined command involves the call of aggregation
  * functions (AVG, SUM, COUNT, MIN, MAX).
@@ -1285,10 +1711,9 @@ static int sp_process_data_aggr(const char *buf_data, size_t buf_size,
     int i;
     int ok;
     int ret;
-    int map_entries;
-    int gb_entries;
     int map_size;
     int key_id;
+    int values_found;
     size_t off;
     int64_t ival;
     double dval;
@@ -1296,23 +1721,17 @@ static int sp_process_data_aggr(const char *buf_data, size_t buf_size,
     msgpack_object map;
     msgpack_unpacked result;
     msgpack_object key;
-    msgpack_object val;
     msgpack_object *obj;
     struct aggr_num *nums = NULL;
-    struct aggr_num *gb_nums; // group-by keys
     struct mk_list *head;
     struct flb_time tms;
     struct flb_sp_cmd *cmd = task->cmd;
     struct flb_sp_cmd_key *ckey;
-    struct flb_sp_cmd_gb_key *gb_key;
     struct flb_sp_value *sval;
     struct flb_exp_val *condition;
     struct aggr_node *aggr_node;
-    struct rb_tree_node *rb_result;
 
     /* Number of expected output entries in the map */
-    map_entries = mk_list_size(&cmd->keys);
-    gb_entries = mk_list_size(&cmd->gb_keys);
     off = 0;
 
     /* vars initialization */
@@ -1346,118 +1765,20 @@ static int sp_process_data_aggr(const char *buf_data, size_t buf_size,
             }
         }
 
+        aggr_node = sp_process_aggregation_data(task, map);
+        if (!aggr_node)
+        {
+            continue;
+        }
+
         task->window.records++;
 
-        if (gb_entries > 0) {
-            gb_nums = flb_calloc(1, sizeof(struct aggr_num) * gb_entries);
-            if (!gb_nums) {
-                flb_errno();
-                msgpack_unpacked_destroy(&result);
-                return -1;
-            }
+        nums = aggr_node->nums;
 
-            /* extract GROUP BY values */
-            for (i = 0; i < map_size; i++) { /* extract group-by values */
-                key = map.via.map.ptr[i].key;
-                val = map.via.map.ptr[i].val;
-
-                key_id = 0;
-                mk_list_foreach(head, &cmd->gb_keys) {
-                    gb_key = mk_list_entry(head, struct flb_sp_cmd_gb_key,
-                                           _head);
-                    if (flb_sds_cmp(gb_key->name, key.via.str.ptr,
-                                    key.via.str.size) != 0) {
-                        continue;
-                    }
-
-                    sval = flb_sp_key_to_value(gb_key->name,
-                                               map,
-                                               gb_key->subkeys);
-                    if (!sval) {
-                        continue;
-                    }
-
-                    /* Associate value to nums */
-                    if (sval->type == FLB_EXP_STRING) {
-                        gb_nums[key_id].type = FLB_SP_STRING;
-                        gb_nums[key_id].string = sval->val.string;
-                        sval->type = FLB_EXP_BOOL;
-                    }
-                    else if (sval->type == FLB_EXP_BOOL) {
-                        gb_nums[key_id].type = FLB_SP_BOOLEAN;
-                        gb_nums[key_id].boolean = sval->val.boolean;
-                    }
-                    else if (sval->type == FLB_EXP_INT) {
-                        gb_nums[key_id].type = FLB_SP_NUM_I64;
-                        gb_nums[key_id].i64 = sval->val.i64;
-                    }
-                    else if (sval->type == FLB_EXP_FLOAT) {
-                        gb_nums[key_id].type = FLB_SP_NUM_F64;
-                        gb_nums[key_id].f64 = sval->val.f64;
-                    }
-
-                    flb_sp_key_value_destroy(sval);
-                    key_id++;
-                }
-            }
-
-            aggr_node = (struct aggr_node *) flb_calloc(1, sizeof(struct aggr_node));
-            aggr_node->groupby_keys = gb_entries;
-            aggr_node->groupby_nums = gb_nums;
-
-            rb_tree_find_or_insert(&task->window.aggr_tree, aggr_node, &aggr_node->_rb_head, &rb_result);
-            if (&aggr_node->_rb_head != rb_result) {
-                nums = container_of(rb_result, struct aggr_node, _rb_head)->nums;
-                container_of(rb_result, struct aggr_node, _rb_head)->records++;
-
-                /* We don't need aggr_node anymore */
-                flb_sp_aggr_node_destroy(aggr_node);
-            }
-            else {
-                aggr_node->nums = flb_calloc(1, sizeof(struct aggr_num) * map_entries);
-                if (!aggr_node->nums) {
-                    flb_errno();
-                    msgpack_unpacked_destroy(&result);
-                    return -1;
-                }
-                nums = aggr_node->nums;
-                aggr_node->records = 1;
-                aggr_node->nums_size = map_entries;
-                mk_list_add(&aggr_node->_head, &task->window.aggr_list);
-            }
-        }
-        else { /* If query doesn't have GROUP BY */
-            if (!mk_list_size(&task->window.aggr_list)) {
-                aggr_node = flb_calloc(1, sizeof(struct aggr_node));
-                if (!aggr_node) {
-                    flb_errno();
-                    msgpack_unpacked_destroy(&result);
-                    return -1;
-                }
-                aggr_node->nums = flb_calloc(1, sizeof(struct aggr_num) * map_entries);
-                if (!aggr_node->nums) {
-                    flb_errno();
-                    flb_free(aggr_node);
-                    msgpack_unpacked_destroy(&result);
-                    return -1;
-                }
-
-                aggr_node->nums_size = map_entries;
-                aggr_node->records = 1;
-                mk_list_add(&aggr_node->_head, &task->window.aggr_list);
-            }
-            else {
-                aggr_node = mk_list_entry_first(&task->window.aggr_list, struct aggr_node, _head);
-                aggr_node->records++;
-            }
-
-            nums = aggr_node->nums;
-        }
-
+        values_found = 0;
         /* Iterate each map key and see if it matches any command key */
         for (i = 0; i < map_size; i++) {
             key = map.via.map.ptr[i].key;
-            val = map.via.map.ptr[i].val;
 
             if (key.type != MSGPACK_OBJECT_STR) {
                 continue;
@@ -1491,6 +1812,8 @@ static int sp_process_data_aggr(const char *buf_data, size_t buf_size,
                     key_id++;
                     continue;
                 }
+
+                values_found++;
 
                 /*
                  * Convert value to a numeric representation only if key has an
@@ -1526,12 +1849,12 @@ static int sp_process_data_aggr(const char *buf_data, size_t buf_size,
                         nums[key_id].type = FLB_SP_NUM_I64;
                         nums[key_id].i64 = sval->o.via.i64;
                     }
-                    else if (val.type == MSGPACK_OBJECT_FLOAT32 ||
-                             val.type == MSGPACK_OBJECT_FLOAT) {
+                    else if (sval->o.type == MSGPACK_OBJECT_FLOAT32 ||
+                             sval->o.type == MSGPACK_OBJECT_FLOAT) {
                         nums[key_id].type = FLB_SP_NUM_F64;
                         nums[key_id].f64 = sval->o.via.f64;
                     }
-                    else if (val.type == MSGPACK_OBJECT_STR) {
+                    else if (sval->o.type == MSGPACK_OBJECT_STR) {
                         nums[key_id].type = FLB_SP_STRING;
                         if (nums[key_id].string == NULL) {
                             nums[key_id].string =
@@ -1558,6 +1881,11 @@ static int sp_process_data_aggr(const char *buf_data, size_t buf_size,
                 key_id++;
                 flb_sp_key_value_destroy(sval);
             }
+        }
+
+        /* Populate timeseries variables */
+        if (sp_process_timeseries_data(cmd, aggr_node, map, &tms) == -1) {
+            return -1;
         }
     }
 
@@ -1781,6 +2109,7 @@ static int sp_process_hopping_slot(const char *tag, int tag_len,
                                    struct flb_sp_task *task)
 {
     int i;
+    int key_id;
     int map_entries;
     int gb_entries;
     struct aggr_num *nums = NULL;
@@ -1799,7 +2128,7 @@ static int sp_process_hopping_slot(const char *tag, int tag_len,
     map_entries = mk_list_size(&cmd->keys);
     gb_entries = mk_list_size(&cmd->gb_keys);
 
-    // Initialize a hoping slot
+    /* Initialize a hoping slot */
     hs = flb_calloc(1, sizeof(struct flb_sp_hopping_slot));
     if (!hs) {
         flb_errno();
@@ -1809,19 +2138,64 @@ static int sp_process_hopping_slot(const char *tag, int tag_len,
     mk_list_init(&hs->aggr_list);
     rb_tree_new(&hs->aggr_tree, flb_sp_groupby_compare);
 
-    // Loop over aggregation nodes on window
+    /* Loop over aggregation nodes on window */
     mk_list_foreach(head, &task->window.aggr_list) {
-        // Window aggregation node
+        /* Window aggregation node */
         aggr_node = mk_list_entry(head, struct aggr_node, _head);
 
-        // Create a hopping slot aggregation node
+        /* Create a hopping slot aggregation node */
         aggr_node_hs = flb_calloc(1, sizeof(struct aggr_node));
-        nums = flb_calloc(1, sizeof(struct aggr_node) * map_entries);
+        if (!aggr_node_hs) {
+            flb_errno();
+            flb_free(hs);
+            return -1;
+        }
+
+        nums = malloc(sizeof(struct aggr_node) * map_entries);
+        if (!nums) {
+            flb_errno();
+            flb_free(hs);
+            flb_free(aggr_node_hs);
+            return -1;
+        }
 
         memcpy(nums, aggr_node->nums, sizeof(struct aggr_num) * map_entries);
         aggr_node_hs->records = aggr_node->records;
+        if (cmd->timeseries_num > 0) {
+            aggr_node_hs->ts = (struct timeseries **)
+                               flb_calloc(1, sizeof(struct timeseries *) * cmd->timeseries_num);
+            if (!aggr_node_hs->ts) {
+                flb_errno();
+                flb_free(nums);
+                flb_free(hs);
+                flb_free(aggr_node_hs);
+                return -1;
+            }
+        }
 
-        // Traverse over previous slots to calculate values/record numbers
+        /* Clone timeseries data */
+        key_id = 0;
+        mk_list_foreach(head_hs, &cmd->keys) {
+            ckey = mk_list_entry(head_hs, struct flb_sp_cmd_key, _head);
+
+            if (ckey->name || !ckey->timeseries_func) {
+                continue;
+            }
+
+            aggr_node_hs->ts[key_id] = ckey->timeseries->cb_func_clone(aggr_node->ts[key_id]);
+            if (!aggr_node_hs->ts[key_id]) {
+                flb_errno();
+                flb_free(nums);
+                flb_free(aggr_node_hs->ts);
+                flb_free(aggr_node_hs);
+                flb_free(hs);
+                return -1;
+            }
+
+            key_id++;
+        }
+
+        /* Traverse over previous slots to calculate values/record numbers */
         mk_list_foreach(head_hs, &task->window.hopping_slot) {
             hs_ = mk_list_entry(head_hs, struct flb_sp_hopping_slot, _head);
             result = rb_tree_find(&hs_->aggr_tree, aggr_node, &rb_result);
@@ -1833,6 +2207,7 @@ static int sp_process_hopping_slot(const char *tag, int tag_len,
                                                _rb_head);
                 aggr_node_hs->records -= aggr_node_prev->records;
 
+                key_id = 0;
                 ckey = mk_list_entry_first(&cmd->keys, struct flb_sp_cmd_key,
                                            _head);
                 for (i = 0; i < map_entries; i++) {
@@ -1848,6 +2223,13 @@ static int sp_process_hopping_slot(const char *tag, int tag_len,
                         break;
                     }
 
+                    if (!ckey->name && ckey->timeseries_func) {
+                        ckey->timeseries->cb_func_rem(aggr_node_hs->ts[key_id],
+                                                      aggr_node_prev->ts[key_id],
+                                                      NULL);
+                        key_id++;
+                    }
+
                     ckey = mk_list_entry_next(&ckey->_head, struct flb_sp_cmd_key,
                                               _head, &cmd->keys);
                 }
@@ -1857,8 +2239,19 @@ static int sp_process_hopping_slot(const char *tag, int tag_len,
         if (aggr_node_hs->records > 0) {
             aggr_node_hs->groupby_nums =
                 flb_calloc(1, sizeof(struct aggr_node) * gb_entries);
-            memcpy(aggr_node_hs->groupby_nums, aggr_node->groupby_nums,
-                   sizeof(struct aggr_num) * gb_entries);
+            if (gb_entries > 0 && !aggr_node_hs->groupby_nums) {
+                flb_errno();
+                flb_free(nums);
+                flb_free(hs);
+                flb_free(aggr_node_hs->ts);
+                flb_free(aggr_node_hs);
+                return -1;
+            }
+
+            if (aggr_node_hs->groupby_nums != NULL) {
+                memcpy(aggr_node_hs->groupby_nums, aggr_node->groupby_nums,
+                       sizeof(struct aggr_num) * gb_entries);
+            }
 
             aggr_node_hs->nums = nums;
             aggr_node_hs->nums_size = aggr_node->nums_size;
@@ -2058,8 +2451,7 @@ int flb_sp_fd_event(int fd, struct flb_sp *sp)
     struct mk_list *tmp;
     struct mk_list *head;
     struct flb_sp_task *task;
-    struct flb_input_instance *in;
-
+    struct flb_input_instance *in = NULL;
 
     /* Lookup Tasks that matches the incoming event */
     mk_list_foreach_safe(head, tmp, &sp->tasks) {
@@ -2080,6 +2472,9 @@ int flb_sp_fd_event(int fd, struct flb_sp *sp)
                     tag_len = strlen(in->name);
                 }
             }
+            else {
+                in = NULL;
+            }
 
             if (task->window.records > 0) {
                 /* find input tag from task source */
@@ -2098,7 +2493,7 @@ int flb_sp_fd_event(int fd, struct flb_sp *sp)
 
             flb_utils_timer_consume(fd);
 
-            if (update_timer_event) {
+            if (update_timer_event && in) {
                 task->window.first_hop = false;
                 mk_event_timeout_destroy(in->config->evl, &task->window.event);
                 mk_event_closesocket(fd);

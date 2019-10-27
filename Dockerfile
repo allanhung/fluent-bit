@@ -16,7 +16,6 @@ RUN apt-get update && \
       wget \
       unzip \
       libssl1.0-dev \
-      libasl-dev \
       libsasl2-dev \
       pkg-config \
       libsystemd-dev \
@@ -54,7 +53,7 @@ COPY conf/fluent-bit.conf \
      /fluent-bit/etc/
 
 FROM gcr.io/distroless/cc
-MAINTAINER Eduardo Silva <eduardo@treasure-data.com>
+LABEL maintainer="Eduardo Silva <eduardo@treasure-data.com>"
 LABEL Description="Fluent Bit docker image" Vendor="Fluent Organization" Version="1.1"
 
 COPY --from=builder /usr/lib/x86_64-linux-gnu/*sasl* /usr/lib/x86_64-linux-gnu/

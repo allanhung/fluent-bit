@@ -438,7 +438,9 @@ int flb_config_set_property(struct flb_config *config,
                     if ( *s_val != NULL ) {
                         flb_free(*s_val); /* release before overwriting */
                     }
-                    *s_val = tmp;
+
+                    *s_val = flb_strdup(tmp);
+                    flb_sds_destroy(tmp);
                     break;
                 default:
                     ret = -1;
